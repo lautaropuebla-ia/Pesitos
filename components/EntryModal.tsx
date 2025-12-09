@@ -10,11 +10,12 @@ interface EntryModalProps {
   onSave: (transaction: Transaction) => void;
   activeProjectId: string;
   categories: string[];
+  initialTransaction?: Transaction | null;
 }
 
 const PAYMENT_METHODS = ['Efectivo', 'Crédito', 'Débito', 'Transferencia', 'Otro'];
 
-const EntryModal: React.FC<EntryModalProps> = ({ isOpen, onClose, onSave, activeProjectId, categories }) => {
+const EntryModal: React.FC<EntryModalProps> = ({ isOpen, onClose, onSave, activeProjectId, categories, initialTransaction }) => {
   const [mode, setMode] = useState<'INPUT' | 'PROCESSING' | 'REVIEW'>('INPUT');
   const [inputText, setInputText] = useState('');
   const [isListening, setIsListening] = useState(false);
@@ -26,11 +27,18 @@ const EntryModal: React.FC<EntryModalProps> = ({ isOpen, onClose, onSave, active
 
   useEffect(() => {
     if (isOpen) {
-      setMode('INPUT');
-      setInputText('');
-      setFormData({});
+      if (initialTransaction) {
+        // Edit Mode
+        setMode('REVIEW');
+        setFormData({ ...initialTransaction });
+      } else {
+        // New Mode
+        setMode('INPUT');
+        setInputText('');
+        setFormData({});
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, initialTransaction]);
 
   const startListening = () => {
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
@@ -67,13 +75,16 @@ const EntryModal: React.FC<EntryModalProps> = ({ isOpen, onClose, onSave, active
     try {
       const result = await parseTransactionInput(textToProcess);
       
+      const isIncome = result.type === 'INCOME';
+
       // Initialize form data with AI result
       setFormData({
         amount: result.amount,
         currency: (result.currency as Currency) || Currency.ARS,
-        type: result.type === 'EXPENSE' ? TransactionType.EXPENSE : TransactionType.INCOME,
-        category: categories.includes(result.category) ? result.category : categories[0],
-        subcategory: result.subcategory,
+        type: isIncome ? TransactionType.INCOME : TransactionType.EXPENSE,
+        // Force 'Ingreso' category if income. Keep specific as subcategory.
+        category: isIncome ? 'Ingreso' : (categories.includes(result.category) ? result.category : categories[0]),
+        subcategory: isIncome && result.category !== 'Ingreso' ? result.category : result.subcategory,
         date: result.date || new Date().toISOString(),
         description: result.description,
         paymentMethod: PAYMENT_METHODS.includes(result.paymentMethod) ? result.paymentMethod : 'Efectivo', // Default to Efectivo if unknown
@@ -102,7 +113,7 @@ const EntryModal: React.FC<EntryModalProps> = ({ isOpen, onClose, onSave, active
   const handleConfirm = () => {
     if (isFormValid()) {
       const transaction: Transaction = {
-        id: uuidv4(),
+        id: initialTransaction ? initialTransaction.id : uuidv4(), // Keep ID if editing
         amount: Number(formData.amount),
         currency: formData.currency || Currency.ARS,
         type: formData.type || TransactionType.EXPENSE,
@@ -130,7 +141,7 @@ const EntryModal: React.FC<EntryModalProps> = ({ isOpen, onClose, onSave, active
         {/* Header */}
         <div className="px-6 py-4 border-b border-white/10 flex justify-between items-center bg-[#1C1C1E]">
           <h2 className="font-semibold text-lg text-white">
-            {mode === 'REVIEW' ? 'Editar y Confirmar' : 'Nueva Transacción'}
+            {initialTransaction ? 'Editar Transacción' : (mode === 'REVIEW' ? 'Confirmar' : 'Nueva Transacción')}
           </h2>
           <button onClick={onClose} className="p-2 rounded-full hover:bg-white/10 text-zinc-400 transition-colors">
             <X size={20} />
@@ -240,7 +251,15 @@ const EntryModal: React.FC<EntryModalProps> = ({ isOpen, onClose, onSave, active
                         <label className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider block mb-1">Tipo *</label>
                         <select 
                             value={formData.type} 
-                            onChange={(e) => setFormData({...formData, type: e.target.value as TransactionType})}
+                            onChange={(e) => {
+                                const newType = e.target.value as TransactionType;
+                                setFormData({
+                                    ...formData, 
+                                    type: newType,
+                                    // Auto switch category if Income
+                                    category: newType === TransactionType.INCOME ? 'Ingreso' : (categories[0] || 'Otros')
+                                });
+                            }}
                             className={`w-full bg-transparent font-bold outline-none text-sm ${formData.type === TransactionType.EXPENSE ? 'text-red-400' : 'text-green-400'}`}
                         >
                             <option value={TransactionType.EXPENSE} className="bg-black text-red-500">Gasto</option>
@@ -289,14 +308,14 @@ const EntryModal: React.FC<EntryModalProps> = ({ isOpen, onClose, onSave, active
                     onClick={() => setMode('INPUT')}
                     className="flex-1 bg-[#2C2C2E] border border-white/5 hover:bg-[#3A3A3C] text-white font-semibold py-3 rounded-xl flex items-center justify-center gap-2"
                 >
-                    <Edit2 size={18} /> Volver
+                    <Edit2 size={18} /> {initialTransaction ? 'Descartar Cambios' : 'Volver'}
                 </button>
                 <button 
                     onClick={handleConfirm}
                     disabled={!isFormValid()}
                     className="flex-1 bg-green-600 hover:bg-green-500 disabled:bg-zinc-700 disabled:text-zinc-500 disabled:shadow-none text-white font-semibold py-3 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-green-900/50 transition-all"
                 >
-                    <Check size={18} /> Guardar
+                    <Check size={18} /> {initialTransaction ? 'Actualizar' : 'Guardar'}
                 </button>
              </div>
           )}

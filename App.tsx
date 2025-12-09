@@ -4,11 +4,12 @@ import { Transaction, TransactionType, Currency, FinancialInsight, RecurringTran
 import TransactionList from './components/TransactionList';
 import Charts from './components/Charts';
 import EntryModal from './components/EntryModal';
+import RecurringSuggestionModal from './components/RecurringSuggestionModal';
 import { generateFinancialInsights, generateFinancialProfile } from './services/geminiService';
 import { v4 as uuidv4 } from 'uuid';
 
 const DEFAULT_CATEGORIES = [
-    'Alimentación', 'Transporte', 'Alquiler', 'Servicios', 'Entretenimiento', 'Salud', 'Educación', 'Otros'
+    'Alimentación', 'Transporte', 'Alquiler', 'Servicios', 'Entretenimiento', 'Salud', 'Educación', 'Otros', 'Ingreso'
 ];
 
 const CATEGORY_EMOJIS: Record<string, string> = {
@@ -24,7 +25,8 @@ const CATEGORY_EMOJIS: Record<string, string> = {
     'Ropa': '👕',
     'Viajes': '✈️',
     'Regalos': '🎁',
-    'Sueldo': '💰',
+    'Ingreso': '💰',
+    'Sueldo': '💵',
     'Inversiones': '📈',
     'Freelance': '💻'
 };
@@ -49,6 +51,8 @@ function App() {
 
   // UI State
   const [isEntryModalOpen, setIsEntryModalOpen] = useState(false);
+  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+  const [isRecurringSuggestionOpen, setIsRecurringSuggestionOpen] = useState(false);
   const [insights, setInsights] = useState<FinancialInsight[]>([]);
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -77,9 +81,8 @@ function App() {
     const saved = localStorage.getItem('pesitos_transactions');
     if (saved) setTransactions(JSON.parse(saved));
 
-    const savedRecurring = localStorage.getItem('pesitos_fixed_costs'); // Keeping key for backward compat or migrate if needed
+    const savedRecurring = localStorage.getItem('pesitos_fixed_costs'); 
     if (savedRecurring) {
-        // Migration check: if type is missing, assume EXPENSE
         const parsed = JSON.parse(savedRecurring);
         const migrated = parsed.map((item: any) => ({
             ...item,
@@ -104,6 +107,63 @@ function App() {
   useEffect(() => { if(userProfile) localStorage.setItem('pesitos_user_profile', JSON.stringify(userProfile)); }, [userProfile]);
   useEffect(() => { localStorage.setItem('pesitos_user_settings', JSON.stringify(userSettings)); }, [userSettings]);
 
+  // --- RECURRING CHECK LOGIC ---
+  useEffect(() => {
+      // Check if we need to suggest recurring items for the current month
+      const checkRecurring = () => {
+          if (recurringItems.length === 0) return;
+
+          const currentMonth = getMonthKey(new Date());
+          const lastPrompt = localStorage.getItem('pesitos_last_recurring_prompt');
+
+          // If we already prompted this month, check if we actually added them? 
+          // Let's rely on the prompt flag first to avoid annoyance.
+          if (lastPrompt === currentMonth) return;
+
+          // Double check: Are there already recurring transactions for this month?
+          const hasRecurringGenerated = transactions.some(t => 
+              getMonthKey(new Date(t.date)) === currentMonth && t.tags.includes('recurrente')
+          );
+
+          if (!hasRecurringGenerated) {
+              setIsRecurringSuggestionOpen(true);
+          }
+      };
+
+      // Run check after initial load
+      const timer = setTimeout(checkRecurring, 1000);
+      return () => clearTimeout(timer);
+  }, [recurringItems, transactions]);
+
+  const confirmRecurringGeneration = () => {
+      const currentMonth = getMonthKey(new Date());
+      const now = new Date();
+      
+      const newTransactions: Transaction[] = recurringItems.map(item => ({
+          id: uuidv4(),
+          amount: item.amount,
+          currency: item.currency,
+          type: item.type,
+          category: item.category,
+          subcategory: 'Fijo',
+          date: now.toISOString(),
+          description: `${item.name} (Mensual)`,
+          paymentMethod: 'Automático',
+          projectId: 'personal',
+          tags: ['recurrente']
+      }));
+
+      setTransactions(prev => [...newTransactions, ...prev]);
+      localStorage.setItem('pesitos_last_recurring_prompt', currentMonth);
+      setIsRecurringSuggestionOpen(false);
+  };
+
+  const closeRecurringSuggestion = () => {
+      // Mark as prompted so we don't ask again this month even if they said no
+      localStorage.setItem('pesitos_last_recurring_prompt', getMonthKey(new Date()));
+      setIsRecurringSuggestionOpen(false);
+  };
+
   // --- DATA PROCESSING ---
 
   // Dashboard always shows CURRENT MONTH
@@ -118,44 +178,85 @@ function App() {
       return transactions.filter(t => getMonthKey(new Date(t.date)) === reportMonthKey);
   }, [transactions, reportMonthKey]);
 
-  // Calculations for Dashboard (Variable / One-off)
-  const dashboardVariableExpense = useMemo(() => 
+  // Calculations for Dashboard
+  const dashboardTotalExpense = useMemo(() => 
     currentMonthTransactions.filter(t => t.type === TransactionType.EXPENSE).reduce((sum, t) => sum + t.amount, 0),
   [currentMonthTransactions]);
 
-  const dashboardVariableIncome = useMemo(() => 
+  const dashboardTotalIncome = useMemo(() => 
     currentMonthTransactions.filter(t => t.type === TransactionType.INCOME).reduce((sum, t) => sum + t.amount, 0),
   [currentMonthTransactions]);
 
-  // Budget Calculations (Recurring)
-  const totalFixedExpenses = useMemo(() => 
+  // Budget Calculations
+  // Total Fixed (Just for display breakdown, derived from config)
+  const totalFixedExpensesConfig = useMemo(() => 
       recurringItems.filter(ri => ri.isEnabled && ri.type === TransactionType.EXPENSE).reduce((sum, ri) => sum + ri.amount, 0), 
   [recurringItems]);
 
-  const totalFixedIncome = useMemo(() => 
+  const totalFixedIncomeConfig = useMemo(() => 
       recurringItems.filter(ri => ri.isEnabled && ri.type === TransactionType.INCOME).reduce((sum, ri) => sum + ri.amount, 0), 
   [recurringItems]);
 
-  // Global Totals (Current Month)
-  const grandTotalIncome = dashboardVariableIncome + totalFixedIncome;
-  const grandTotalExpenses = dashboardVariableExpense + totalFixedExpenses;
+  // Grand Totals from REAL transactions
+  const grandTotalIncome = dashboardTotalIncome;
+  const grandTotalExpenses = dashboardTotalExpense;
   const grandTotalBalance = grandTotalIncome - grandTotalExpenses;
+
+  // Analyze Real Data for breakdown
+  const realFixedExpenses = currentMonthTransactions
+    .filter(t => t.type === TransactionType.EXPENSE && t.tags.includes('recurrente'))
+    .reduce((sum, t) => sum + t.amount, 0);
+
+  const realVariableExpenses = currentMonthTransactions
+    .filter(t => t.type === TransactionType.EXPENSE && !t.tags.includes('recurrente'))
+    .reduce((sum, t) => sum + t.amount, 0);
 
   // --- ACTIONS ---
 
-  const handleSaveTransaction = (newTransaction: Transaction) => {
-    setTransactions(prev => [newTransaction, ...prev]);
+  const handleSaveTransaction = (transaction: Transaction) => {
+    setTransactions(prev => {
+        // Check if updating an existing transaction
+        const index = prev.findIndex(t => t.id === transaction.id);
+        if (index >= 0) {
+            const updated = [...prev];
+            updated[index] = transaction;
+            return updated;
+        }
+        // Else add new
+        return [transaction, ...prev];
+    });
+    setEditingTransaction(null);
+  };
+
+  const handleEditTransaction = (transaction: Transaction) => {
+      setEditingTransaction(transaction);
+      setIsEntryModalOpen(true);
+  };
+
+  const handleDeleteTransaction = (id: string) => {
+      if (confirm("¿Estás seguro de eliminar esta transacción?")) {
+          setTransactions(prev => prev.filter(t => t.id !== id));
+      }
+  };
+
+  const handleModalClose = () => {
+      setIsEntryModalOpen(false);
+      setEditingTransaction(null);
   };
 
   const addRecurringItem = () => {
     if (!newRecurringItem.name || !newRecurringItem.amount) return;
+    
+    // Ensure Income is always category 'Ingreso'
+    const finalCategory = newRecurringItem.type === TransactionType.INCOME ? 'Ingreso' : newRecurringItem.category;
+
     const item: RecurringTransaction = {
         id: uuidv4(),
         name: newRecurringItem.name,
         amount: parseFloat(newRecurringItem.amount),
         currency: Currency.ARS,
         type: newRecurringItem.type,
-        category: newRecurringItem.category,
+        category: finalCategory,
         isEnabled: true
     };
     setRecurringItems([...recurringItems, item]);
@@ -172,6 +273,10 @@ function App() {
   };
   
   const removeCategory = (cat: string) => {
+      if (cat === 'Ingreso') {
+          alert("La categoría Ingreso no se puede eliminar.");
+          return;
+      }
       if (confirm(`¿Eliminar categoría "${cat}"?`)) setCategories(categories.filter(c => c !== cat));
   };
 
@@ -207,7 +312,7 @@ function App() {
     });
 
     if (filtered.length === 0) {
-        alert("No hay transacciones en ese rango de fechas.");
+        alert("No hay transacciones registradas en ese rango de fechas.");
         return;
     }
 
@@ -299,31 +404,36 @@ function App() {
                      <Target size={40} />
                  </div>
                 <p className="text-zinc-400 text-xs font-semibold uppercase tracking-wider mb-2">Gastos</p>
-                <h2 className="text-2xl md:text-3xl font-bold tracking-tight">$ {dashboardVariableExpense.toLocaleString('es-AR')}</h2>
+                <h2 className="text-2xl md:text-3xl font-bold tracking-tight">$ {dashboardTotalExpense.toLocaleString('es-AR')}</h2>
               </div>
               <div className="bg-[#1C1C1E] p-5 rounded-3xl text-white border border-white/5 relative overflow-hidden group">
                  <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
                      <Banknote size={40} />
                  </div>
                  <p className="text-zinc-400 text-xs font-semibold uppercase tracking-wider mb-2">Ingresos</p>
-                 <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-green-500">+$ {dashboardVariableIncome.toLocaleString('es-AR')}</h2>
+                 <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-green-500">+$ {dashboardTotalIncome.toLocaleString('es-AR')}</h2>
               </div>
             </div>
 
             {/* Quick Balance */}
              <div className="bg-[#1C1C1E] p-5 rounded-3xl border border-white/5 flex justify-between items-center">
                 <span className="text-zinc-300 font-medium">Balance Neto</span>
-                <span className={`text-xl font-bold ${(dashboardVariableIncome - dashboardVariableExpense) >= 0 ? 'text-blue-500' : 'text-red-500'}`}>
-                    $ {(dashboardVariableIncome - dashboardVariableExpense).toLocaleString('es-AR')}
+                <span className={`text-xl font-bold ${(dashboardTotalIncome - dashboardTotalExpense) >= 0 ? 'text-blue-500' : 'text-red-500'}`}>
+                    $ {(dashboardTotalIncome - dashboardTotalExpense).toLocaleString('es-AR')}
                 </span>
              </div>
 
             {/* Recent Transactions Header */}
             <div className="flex justify-between items-center mt-6 mb-2 pl-1">
-              <h3 className="font-bold text-lg text-white">Movimientos</h3>
+              <h3 className="font-bold text-lg text-white">Movimientos Recientes</h3>
             </div>
 
-            <TransactionList transactions={currentMonthTransactions} getCategoryEmoji={getCategoryEmoji} />
+            <TransactionList 
+                transactions={currentMonthTransactions} 
+                getCategoryEmoji={getCategoryEmoji} 
+                onEdit={handleEditTransaction}
+                onDelete={handleDeleteTransaction}
+            />
           </div>
         )}
 
@@ -402,6 +512,7 @@ function App() {
                       >
                           <Download size={16} /> Descargar Excel (.csv)
                       </button>
+                      <p className="text-[10px] text-zinc-600 text-center mt-1">Exporta las transacciones actuales.</p>
                   </div>
               </div>
 
@@ -452,8 +563,7 @@ function App() {
                                <span className="text-green-400 font-bold text-xl">$ {grandTotalIncome.toLocaleString('es-AR')}</span>
                            </div>
                            <div className="flex justify-between text-xs text-zinc-400 px-1">
-                               <span>Fijos (Sueldos, etc): $ {totalFixedIncome.toLocaleString('es-AR')}</span>
-                               <span>Variables: $ {dashboardVariableIncome.toLocaleString('es-AR')}</span>
+                               <span>Fijos (Estimado): $ {totalFixedIncomeConfig.toLocaleString('es-AR')}</span>
                            </div>
                       </div>
 
@@ -470,8 +580,9 @@ function App() {
                                <span className="text-red-400 font-bold text-xl">$ {grandTotalExpenses.toLocaleString('es-AR')}</span>
                            </div>
                            <div className="flex justify-between text-xs text-zinc-400 px-1">
-                               <span>Fijos: $ {totalFixedExpenses.toLocaleString('es-AR')}</span>
-                               <span>Variables: $ {dashboardVariableExpense.toLocaleString('es-AR')}</span>
+                               <span>Fijos (Estimado): $ {totalFixedExpensesConfig.toLocaleString('es-AR')}</span>
+                               <span>Fijos (Pagados): $ {realFixedExpenses.toLocaleString('es-AR')}</span>
+                               <span>Variables: $ {realVariableExpenses.toLocaleString('es-AR')}</span>
                            </div>
                       </div>
 
@@ -495,16 +606,18 @@ function App() {
                {/* Recurring Items Manager */}
                <div className="bg-[#1C1C1E] rounded-3xl p-6 shadow-sm border border-white/5">
                   <h3 className="text-lg font-bold text-white mb-4">Movimientos Recurrentes Mensuales</h3>
+                  <p className="text-xs text-zinc-500 mb-4">Estos ítems se te sugerirán para añadir al inicio de cada mes.</p>
+                  
                   <div className="flex flex-col gap-3 mb-4">
                       <div className="flex gap-2 bg-black/50 p-1 rounded-xl">
                           <button 
-                            onClick={() => setNewRecurringItem({...newRecurringItem, type: TransactionType.INCOME})}
+                            onClick={() => setNewRecurringItem({...newRecurringItem, type: TransactionType.INCOME, category: 'Ingreso'})}
                             className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${newRecurringItem.type === TransactionType.INCOME ? 'bg-green-600 text-white shadow-md' : 'text-zinc-500 hover:text-white'}`}
                           >
                               Ingreso Fijo
                           </button>
                           <button 
-                            onClick={() => setNewRecurringItem({...newRecurringItem, type: TransactionType.EXPENSE})}
+                            onClick={() => setNewRecurringItem({...newRecurringItem, type: TransactionType.EXPENSE, category: DEFAULT_CATEGORIES[0]})}
                             className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${newRecurringItem.type === TransactionType.EXPENSE ? 'bg-red-600 text-white shadow-md' : 'text-zinc-500 hover:text-white'}`}
                           >
                               Gasto Fijo
@@ -538,7 +651,7 @@ function App() {
                                   <div className={`w-2 h-2 rounded-full ${ri.type === TransactionType.INCOME ? 'bg-green-500' : 'bg-red-500'}`}></div>
                                   <div>
                                     <div className="font-medium text-white">{ri.name}</div>
-                                    <div className="text-xs text-zinc-500">{ri.type === TransactionType.INCOME ? 'Ingreso Recurrente' : 'Gasto Fijo'}</div>
+                                    <div className="text-xs text-zinc-500">{ri.category}</div>
                                   </div>
                               </div>
                               <div className="flex items-center gap-3">
@@ -552,37 +665,6 @@ function App() {
                           </div>
                       ))}
                       {recurringItems.length === 0 && <p className="text-sm text-zinc-600 text-center italic py-2">No hay movimientos recurrentes.</p>}
-                  </div>
-               </div>
-
-               {/* Category Manager */}
-               <div className="bg-[#1C1C1E] rounded-3xl p-6 shadow-sm border border-white/5">
-                  <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
-                      <Settings size={20} className="text-zinc-500"/>
-                      Gestionar Categorías
-                  </h3>
-                  <div className="flex gap-2 mb-4">
-                      <input 
-                        type="text" 
-                        placeholder="Nueva Categoría..." 
-                        className="flex-1 bg-black border border-white/10 rounded-xl px-3 py-3 text-sm outline-none focus:border-blue-500 text-white"
-                        value={newCategory}
-                        onChange={e => setNewCategory(e.target.value)}
-                      />
-                      <button onClick={addCategory} className="bg-blue-600 text-white p-3 rounded-xl hover:bg-blue-500 transition-colors">
-                          <Plus size={20} />
-                      </button>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                      {categories.map(cat => (
-                          <span key={cat} className="inline-flex items-center gap-1 bg-zinc-800 px-3 py-1.5 rounded-full text-sm text-zinc-300 border border-white/5">
-                              <span className="mr-1">{getCategoryEmoji(cat)}</span>
-                              {cat}
-                              <button onClick={() => removeCategory(cat)} className="ml-1 text-zinc-500 hover:text-red-400">
-                                  <Trash2 size={12} className="w-3 h-3" />
-                              </button>
-                          </span>
-                      ))}
                   </div>
                </div>
             </div>
@@ -628,6 +710,37 @@ function App() {
                     </div>
                     <p className="text-zinc-500 mt-1">Usuario Personal</p>
                 </div>
+
+                {/* Category Manager */}
+               <div className="bg-[#1C1C1E] rounded-3xl p-6 shadow-sm border border-white/5">
+                  <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
+                      <Settings size={20} className="text-zinc-500"/>
+                      Gestionar Categorías
+                  </h3>
+                  <div className="flex gap-2 mb-4">
+                      <input 
+                        type="text" 
+                        placeholder="Nueva Categoría..." 
+                        className="flex-1 bg-black border border-white/10 rounded-xl px-3 py-3 text-sm outline-none focus:border-blue-500 text-white"
+                        value={newCategory}
+                        onChange={e => setNewCategory(e.target.value)}
+                      />
+                      <button onClick={addCategory} className="bg-blue-600 text-white p-3 rounded-xl hover:bg-blue-500 transition-colors">
+                          <Plus size={20} />
+                      </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                      {categories.map(cat => (
+                          <span key={cat} className="inline-flex items-center gap-1 bg-zinc-800 px-3 py-1.5 rounded-full text-sm text-zinc-300 border border-white/5">
+                              <span className="mr-1">{getCategoryEmoji(cat)}</span>
+                              {cat}
+                              <button onClick={() => removeCategory(cat)} className="ml-1 text-zinc-500 hover:text-red-400">
+                                  <Trash2 size={12} className="w-3 h-3" />
+                              </button>
+                          </span>
+                      ))}
+                  </div>
+               </div>
 
                 {/* AI Profile Section */}
                 <div className="bg-gradient-to-br from-indigo-600 to-purple-700 rounded-3xl p-6 text-white shadow-xl border border-white/10">
@@ -755,10 +868,19 @@ function App() {
 
       <EntryModal 
         isOpen={isEntryModalOpen} 
-        onClose={() => setIsEntryModalOpen(false)}
+        onClose={handleModalClose}
         onSave={handleSaveTransaction}
         activeProjectId={'personal'}
         categories={categories}
+        initialTransaction={editingTransaction}
+      />
+
+      <RecurringSuggestionModal 
+        isOpen={isRecurringSuggestionOpen}
+        onClose={closeRecurringSuggestion}
+        onConfirm={confirmRecurringGeneration}
+        items={recurringItems}
+        monthName={new Date().toLocaleString('es-AR', { month: 'long' })}
       />
     </div>
   );

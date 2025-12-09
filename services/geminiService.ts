@@ -9,6 +9,11 @@ Fecha Actual: ${new Date().toISOString()}
 Moneda Predeterminada: ARS (Pesos Argentinos).
 Interpreta fechas relativas (ej: "ayer", "el viernes pasado", "hace 3 días") basándote en la Fecha Actual.
 Categoriza inteligentemente basándote en la descripción.
+
+REGLA IMPORTANTE DE CATEGORÍAS:
+1. Si la transacción es un INGRESO (cobro sueldo, venta, dinero recibido), la categoría principal DEBE SER SIEMPRE "Ingreso".
+2. Si puedes detectar un tipo específico de ingreso (ej. "Sueldo", "Venta", "Freelance"), ponlo en el campo 'subcategory'.
+3. Para GASTOS, usa categorías estándar como "Alimentación", "Transporte", "Servicios", etc.
 `;
 
 export const parseTransactionInput = async (input: string): Promise<ParsingResult> => {
