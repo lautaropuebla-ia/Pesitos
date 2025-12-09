@@ -1,0 +1,7 @@
+{
+  "name": "Pesitos",
+  "description": "Tu gestor de gastos inteligente y argentino.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
